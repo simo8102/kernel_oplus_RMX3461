@@ -734,6 +734,27 @@ retry:
 			crng_reseed(&primary_crng, r);
 			entropy_bits = ENTROPY_BITS(r);
 		}
+
+		/* initialize the blocking pool if necessary */
+		if (entropy_bits >= random_read_wakeup_bits &&
+		    !other->initialized) {
+			schedule_work(&other->push_work);
+			return;
+		}
+
+		/* should we wake readers? */
+		if (entropy_bits >= random_read_wakeup_bits &&
+		    wq_has_sleeper(&random_read_wait)) {
+			wake_up_interruptible(&random_read_wait);
+		}
+		/* If the input pool is getting full, and the blocking
+		 * pool has room, send some entropy to the blocking
+		 * pool.
+		 */
+		if (!work_pending(&other->push_work) &&
+		    (ENTROPY_BITS(r) > 6 * r->poolinfo->poolbytes) &&
+		    (ENTROPY_BITS(other) <= 6 * other->poolinfo->poolbytes))
+			schedule_work(&other->push_work);
 	}
 }
 
@@ -1796,18 +1817,6 @@ void rand_initialize_disk(struct gendisk *disk)
 	}
 }
 #endif
-
-static ssize_t
-urandom_read_nowarn(struct file *file, char __user *buf, size_t nbytes,
-		    loff_t *ppos)
-{
-	int ret;
-
-	nbytes = min_t(size_t, nbytes, INT_MAX >> (ENTROPY_SHIFT + 3));
-	ret = extract_crng_user(buf, nbytes);
-	trace_urandom_read(8 * nbytes, 0, ENTROPY_BITS(&input_pool));
-	return ret;
-}
 
 static ssize_t
 urandom_read_nowarn(struct file *file, char __user *buf, size_t nbytes,
