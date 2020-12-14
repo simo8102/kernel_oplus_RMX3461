@@ -634,6 +634,11 @@ const struct file_operations ovl_file_operations = {
 	.fadvise	= ovl_fadvise,
 	.unlocked_ioctl	= ovl_ioctl,
 	.compat_ioctl	= ovl_compat_ioctl,
+<<<<<<< HEAD
+=======
+	.splice_read    = generic_file_splice_read,
+	.splice_write   = iter_file_splice_write,
+>>>>>>> 43d93325265b (ovl: simplify file splice)
 
 	.copy_file_range	= ovl_copy_file_range,
 	.remap_file_range	= ovl_remap_file_range,
