@@ -2517,35 +2517,7 @@ static int dwc3_gadget_pullup(struct usb_gadget *g, int is_on)
 	ktime_t			diff;
 
 	is_on = !!is_on;
-	spin_lock_irqsave(&dwc->lock, flags);
 	dwc->softconnect = is_on;
-
-	if (((dwc->dr_mode > USB_DR_MODE_HOST) && !dwc->vbus_active)
-			|| !dwc->gadget_driver || (dwc->err_evt_seen &&
-				dwc->softconnect)) {
-		/*
-		 * Need to wait for vbus_session(on) from otg driver or to
-		 * the udc_start.
-		 */
-		spin_unlock_irqrestore(&dwc->lock, flags);
-		dbg_event(0xFF, "WaitPullup", 0);
-		return 0;
-	}
-	spin_unlock_irqrestore(&dwc->lock, flags);
-
-	pm_runtime_get_sync(dwc->dev);
-	dbg_event(0xFF, "Pullup gsync",
-		atomic_read(&dwc->dev->power.usage_count));
-
-	diff = ktime_sub(ktime_get(), dwc->last_run_stop);
-	if (ktime_to_ms(diff) < MIN_RUN_STOP_DELAY_MS) {
-		dbg_event(0xFF, "waitBefRun_Stop",
-			  MIN_RUN_STOP_DELAY_MS - ktime_to_ms(diff));
-		msleep(MIN_RUN_STOP_DELAY_MS - ktime_to_ms(diff));
-	}
-
-	dwc->last_run_stop = ktime_get();
-
 	/*
 	 * Per databook, when we want to stop the gadget, if a control transfer
 	 * is still in process, complete it and get the core into setup phase.
@@ -4527,7 +4499,7 @@ int dwc3_gadget_resume(struct dwc3 *dwc)
 {
 	int			ret;
 
-	if (!dwc->gadget_driver)
+	if (!dwc->gadget_driver || !dwc->softconnect)
 		return 0;
 
 	ret = __dwc3_gadget_start(dwc);
