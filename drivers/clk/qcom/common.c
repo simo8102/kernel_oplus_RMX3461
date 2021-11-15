@@ -89,7 +89,11 @@ int qcom_find_cfg_index(struct clk_hw *hw, const struct parent_map *map, u8 cfg)
 
 	return -ENOENT;
 }
+<<<<<<< HEAD
 EXPORT_SYMBOL(qcom_find_cfg_index);
+=======
+EXPORT_SYMBOL_GPL(qcom_find_cfg_index);
+>>>>>>> f53b73953ff8 (clk: qcom: regmap-mux: fix parent clock lookup)
 
 struct regmap *
 qcom_cc_map(struct platform_device *pdev, const struct qcom_cc_desc *desc)
