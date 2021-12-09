@@ -146,7 +146,11 @@ struct dev_data {
 	struct dentry			*dentry;
 
 	/* except this scratch i/o buffer for ep0 */
+<<<<<<< HEAD
 	u8				rbuf [RBUF_SIZE];
+=======
+	u8				rbuf[RBUF_SIZE];
+>>>>>>> fd6de5a0cd42 (USB: gadget: detect too-big endpoint 0 requests)
 };
 
 static inline void get_dev (struct dev_data *data)
@@ -1336,14 +1340,23 @@ gadgetfs_setup (struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 	u16				w_length = le16_to_cpu(ctrl->wLength);
 
 	if (w_length > RBUF_SIZE) {
+<<<<<<< HEAD
 		if (ctrl->bRequestType & USB_DIR_IN) {
+=======
+		if (ctrl->bRequestType == USB_DIR_OUT) {
+			return value;
+		} else {
+>>>>>>> fd6de5a0cd42 (USB: gadget: detect too-big endpoint 0 requests)
 			/* Cast away the const, we are going to overwrite on purpose. */
 			__le16 *temp = (__le16 *)&ctrl->wLength;
 
 			*temp = cpu_to_le16(RBUF_SIZE);
 			w_length = RBUF_SIZE;
+<<<<<<< HEAD
 		} else {
 			return value;
+=======
+>>>>>>> fd6de5a0cd42 (USB: gadget: detect too-big endpoint 0 requests)
 		}
 	}
 
