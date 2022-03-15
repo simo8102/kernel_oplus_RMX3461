@@ -1103,23 +1103,9 @@ alternative_else_nop_endif
 	.macro tramp_ventry, vector_start, regsize, kpti
 	.align	7
 1:
-	.if	\kpti == 1
 	.if	\regsize == 64
 	msr	tpidrro_el0, x30	// Restored in kernel_ventry
 	.endif
-
-	.if	\bhb == BHB_MITIGATION_LOOP
-	/*
-	 * This sequence must appear before the first indirect branch. i.e. the
-	 * ret out of tramp_ventry. It appears here because x30 is free.
-	 */
-	__mitigate_spectre_bhb_loop	x30
-	.endif // \bhb == BHB_MITIGATION_LOOP
-
-	.if	\bhb == BHB_MITIGATION_INSN
-	clearbhb
-	isb
-	.endif // \bhb == BHB_MITIGATION_INSN
 
 	.if	\kpti == 1
 	/*
@@ -1234,7 +1220,7 @@ __entry_tramp_data_this_cpu_vector:
  * Exception vectors for spectre mitigations on entry from EL1 when
  * kpti is not in use.
  */
-	.macro generate_el1_vector, bhb
+	.macro generate_el1_vector
 .Lvector_start\@:
 	kernel_ventry	1, sync_invalid			// Synchronous EL1t
 	kernel_ventry	1, irq_invalid			// IRQ EL1t
@@ -1247,22 +1233,17 @@ __entry_tramp_data_this_cpu_vector:
 	kernel_ventry	1, error			// Error EL1h
 
 	.rept	4
-	tramp_ventry	.Lvector_start\@, 64, 0, \bhb
+	tramp_ventry	.Lvector_start\@, 64, kpti=0
 	.endr
 	.rept 4
-	tramp_ventry	.Lvector_start\@, 32, 0, \bhb
+	tramp_ventry	.Lvector_start\@, 32, kpti=0
 	.endr
 	.endm
 
-/* The order must match tramp_vecs and the arm64_bp_harden_el1_vectors enum. */
 	.pushsection ".entry.text", "ax"
 	.align	11
 SYM_CODE_START(__bp_harden_el1_vectors)
-#ifdef CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY
-	generate_el1_vector	bhb=BHB_MITIGATION_LOOP
-	generate_el1_vector	bhb=BHB_MITIGATION_FW
-	generate_el1_vector	bhb=BHB_MITIGATION_INSN
-#endif /* CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY */
+	generate_el1_vector
 SYM_CODE_END(__bp_harden_el1_vectors)
 	.popsection
 
