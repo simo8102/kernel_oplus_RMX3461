@@ -1139,7 +1139,7 @@ alternative_if_not ARM64_WORKAROUND_CAVIUM_TX2_219_PRFM
 alternative_else_nop_endif
 
 	msr	vbar_el1, x30
-	add	x30, x30, #(1b - tramp_vectors + 4)
+	add	x30, x30, #(1b - \vector_start + 4)
 	isb
 	.else
 	ldr	x30, =vectors
@@ -1179,7 +1179,7 @@ alternative_endif
 	sb
 	.endm
 
-	.macro	generate_tramp_vector,	kpti, bhb
+	.macro	generate_tramp_vector
 .Lvector_start\@:
 	.space	0x400
 
