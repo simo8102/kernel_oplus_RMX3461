@@ -2545,9 +2545,6 @@ static int dwc3_gadget_pullup(struct usb_gadget *g, int is_on)
 
 	is_on = !!is_on;
 
-	if (dwc->pullups_connected == is_on)
-		return 0;
-
 	dwc->softconnect = is_on;
 	/*
 	 * Per databook, when we want to stop the gadget, if a control transfer
@@ -2567,6 +2564,11 @@ static int dwc3_gadget_pullup(struct usb_gadget *g, int is_on)
 	dwc->pullups_connected = is_on;
 
 	disable_irq(dwc->irq);
+
+	if (dwc->pullups_connected == is_on) {
+		pm_runtime_put(dwc->dev);
+		return 0;
+	}
 
 	if (!is_on) {
 		ret = dwc3_gadget_soft_disconnect(dwc);
