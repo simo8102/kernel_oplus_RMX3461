@@ -246,96 +246,6 @@ enum binder_deferred_state {
 	BINDER_DEFERRED_RELEASE      = 0x02,
 };
 
-<<<<<<< HEAD
-=======
-/**
- * struct binder_proc - binder process bookkeeping
- * @proc_node:            element for binder_procs list
- * @threads:              rbtree of binder_threads in this proc
- *                        (protected by @inner_lock)
- * @nodes:                rbtree of binder nodes associated with
- *                        this proc ordered by node->ptr
- *                        (protected by @inner_lock)
- * @refs_by_desc:         rbtree of refs ordered by ref->desc
- *                        (protected by @outer_lock)
- * @refs_by_node:         rbtree of refs ordered by ref->node
- *                        (protected by @outer_lock)
- * @waiting_threads:      threads currently waiting for proc work
- *                        (protected by @inner_lock)
- * @pid                   PID of group_leader of process
- *                        (invariant after initialized)
- * @tsk                   task_struct for group_leader of process
- *                        (invariant after initialized)
- * @cred                  struct cred associated with the `struct file`
- *                        in binder_open()
- *                        (invariant after initialized)
- * @deferred_work_node:   element for binder_deferred_list
- *                        (protected by binder_deferred_lock)
- * @deferred_work:        bitmap of deferred work to perform
- *                        (protected by binder_deferred_lock)
- * @is_dead:              process is dead and awaiting free
- *                        when outstanding transactions are cleaned up
- *                        (protected by @inner_lock)
- * @todo:                 list of work for this process
- *                        (protected by @inner_lock)
- * @stats:                per-process binder statistics
- *                        (atomics, no lock needed)
- * @delivered_death:      list of delivered death notification
- *                        (protected by @inner_lock)
- * @max_threads:          cap on number of binder threads
- *                        (protected by @inner_lock)
- * @requested_threads:    number of binder threads requested but not
- *                        yet started. In current implementation, can
- *                        only be 0 or 1.
- *                        (protected by @inner_lock)
- * @requested_threads_started: number binder threads started
- *                        (protected by @inner_lock)
- * @tmp_ref:              temporary reference to indicate proc is in use
- *                        (protected by @inner_lock)
- * @default_priority:     default scheduler priority
- *                        (invariant after initialized)
- * @debugfs_entry:        debugfs node
- * @alloc:                binder allocator bookkeeping
- * @context:              binder_context for this proc
- *                        (invariant after initialized)
- * @inner_lock:           can nest under outer_lock and/or node lock
- * @outer_lock:           no nesting under innor or node lock
- *                        Lock order: 1) outer, 2) node, 3) inner
- * @binderfs_entry:       process-specific binderfs log file
- *
- * Bookkeeping structure for binder processes
- */
-struct binder_proc {
-	struct hlist_node proc_node;
-	struct rb_root threads;
-	struct rb_root nodes;
-	struct rb_root refs_by_desc;
-	struct rb_root refs_by_node;
-	struct list_head waiting_threads;
-	int pid;
-	struct task_struct *tsk;
-	const struct cred *cred;
-	struct hlist_node deferred_work_node;
-	int deferred_work;
-	bool is_dead;
-
-	struct list_head todo;
-	struct binder_stats stats;
-	struct list_head delivered_death;
-	int max_threads;
-	int requested_threads;
-	int requested_threads_started;
-	int tmp_ref;
-	long default_priority;
-	struct dentry *debugfs_entry;
-	struct binder_alloc alloc;
-	struct binder_context *context;
-	spinlock_t inner_lock;
-	spinlock_t outer_lock;
-	struct dentry *binderfs_entry;
-};
-
->>>>>>> 28a1e470b000 (binder: use euid from cred instead of using task)
 enum {
 	BINDER_LOOPER_STATE_REGISTERED  = 0x01,
 	BINDER_LOOPER_STATE_ENTERED     = 0x02,
@@ -2185,7 +2095,6 @@ static void binder_deferred_fd_close(int fd)
 }
 
 static void binder_transaction_buffer_release(struct binder_proc *proc,
-					      struct binder_thread *thread,
 					      struct binder_buffer *buffer,
 					      binder_size_t failed_at,
 					      bool is_failure)
@@ -2203,7 +2112,7 @@ static void binder_transaction_buffer_release(struct binder_proc *proc,
 		binder_dec_node(buffer->target_node, 1, 0);
 
 	off_start_offset = ALIGN(buffer->data_size, sizeof(void *));
-	off_end_offset = is_failure && failed_at ? failed_at :
+	off_end_offset = is_failure ? failed_at :
 				off_start_offset + buffer->offsets_size;
 	for (buffer_offset = off_start_offset; buffer_offset < off_end_offset;
 	     buffer_offset += sizeof(binder_size_t)) {
@@ -2289,8 +2198,9 @@ static void binder_transaction_buffer_release(struct binder_proc *proc,
 			binder_size_t fd_buf_size;
 			binder_size_t num_valid;
 
-			if (is_failure) {
+			if (proc->tsk != current->group_leader) {
 				/*
+				 * Nothing to do if running in sender context
 				 * The fd fixups have not been applied so no
 				 * fds need to be closed.
 				 */
@@ -2344,16 +2254,8 @@ static void binder_transaction_buffer_release(struct binder_proc *proc,
 						&proc->alloc, &fd, buffer,
 						offset, sizeof(fd));
 				WARN_ON(err);
-				if (!err) {
+				if (!err)
 					binder_deferred_fd_close(fd);
-					/*
-					 * Need to make sure the thread goes
-					 * back to userspace to complete the
-					 * deferred close
-					 */
-					if (thread)
-						thread->looper_need_return = true;
-				}
 			}
 		} break;
 		default:
@@ -2398,7 +2300,7 @@ static int binder_translate_binder(struct flat_binder_object *fp,
 		ret = -EINVAL;
 		goto done;
 	}
-	if (security_binder_transfer_binder(proc->cred, target_proc->cred)) {
+	if (security_binder_transfer_binder(proc->tsk, target_proc->tsk)) {
 		ret = -EPERM;
 		goto done;
 	}
@@ -2444,7 +2346,7 @@ static int binder_translate_handle(struct flat_binder_object *fp,
 				  proc->pid, thread->pid, fp->handle);
 		return -EINVAL;
 	}
-	if (security_binder_transfer_binder(proc->cred, target_proc->cred)) {
+	if (security_binder_transfer_binder(proc->tsk, target_proc->tsk)) {
 		ret = -EPERM;
 		goto done;
 	}
@@ -2532,7 +2434,7 @@ static int binder_translate_fd(u32 fd, binder_size_t fd_offset,
 		ret = -EBADF;
 		goto err_fget;
 	}
-	ret = security_binder_transfer_file(proc->cred, target_proc->cred, file);
+	ret = security_binder_transfer_file(proc->tsk, target_proc->tsk, file);
 	if (ret < 0) {
 		ret = -EPERM;
 		goto err_security;
@@ -2994,19 +2896,8 @@ static void binder_transaction(struct binder_proc *proc,
 		hans_check_binder(tr, proc, target_proc, true);
 #endif /*OPLUS_FEATURE_HANS_FREEZE*/
 		e->to_node = target_node->debug_id;
-<<<<<<< HEAD
 		if (security_binder_transaction(proc->tsk,
 						target_proc->tsk) < 0) {
-=======
-		if (WARN_ON(proc == target_proc)) {
-			return_error = BR_FAILED_REPLY;
-			return_error_param = -EINVAL;
-			return_error_line = __LINE__;
-			goto err_invalid_target_handle;
-		}
-		if (security_binder_transaction(proc->cred,
-						target_proc->cred) < 0) {
->>>>>>> fc9c470cd519 (binder: use cred instead of task for selinux checks)
 			return_error = BR_FAILED_REPLY;
 			return_error_param = -EPERM;
 			return_error_line = __LINE__;
@@ -3141,7 +3032,7 @@ static void binder_transaction(struct binder_proc *proc,
 		u32 secid;
 		size_t added_size;
 
-		security_cred_getsecid(proc->cred, &secid);
+		security_task_getsecid(proc->tsk, &secid);
 		ret = security_secid_to_secctx(secid, &secctx, &secctx_sz);
 		if (ret) {
 			return_error = BR_FAILED_REPLY;
@@ -3532,7 +3423,7 @@ err_bad_parent:
 err_copy_data_failed:
 	binder_free_txn_fixups(t);
 	trace_binder_transaction_failed_buffer_release(t->buffer);
-	binder_transaction_buffer_release(target_proc, NULL, t->buffer,
+	binder_transaction_buffer_release(target_proc, t->buffer,
 					  buffer_offset, true);
 	if (target_node)
 		binder_dec_node_tmpref(target_node);
@@ -3604,7 +3495,6 @@ err_invalid_target_handle:
  * binder_free_buf() - free the specified buffer
  * @proc:	binder proc that owns buffer
  * @buffer:	buffer to be freed
- * @is_failure:	failed to send transaction
  *
  * If buffer for an async transaction, enqueue the next async
  * transaction from the node.
@@ -3612,9 +3502,7 @@ err_invalid_target_handle:
  * Cleanup buffer and free it.
  */
 static void
-binder_free_buf(struct binder_proc *proc,
-		struct binder_thread *thread,
-		struct binder_buffer *buffer, bool is_failure)
+binder_free_buf(struct binder_proc *proc, struct binder_buffer *buffer)
 {
 	binder_inner_proc_lock(proc);
 	if (buffer->transaction) {
@@ -3642,7 +3530,7 @@ binder_free_buf(struct binder_proc *proc,
 		binder_node_inner_unlock(buf_node);
 	}
 	trace_binder_transaction_buffer_release(buffer);
-	binder_transaction_buffer_release(proc, thread, buffer, 0, is_failure);
+	binder_transaction_buffer_release(proc, buffer, 0, false);
 	binder_alloc_free_buf(&proc->alloc, buffer);
 }
 
@@ -3836,7 +3724,7 @@ static int binder_thread_write(struct binder_proc *proc,
 				     proc->pid, thread->pid, (u64)data_ptr,
 				     buffer->debug_id,
 				     buffer->transaction ? "active" : "finished");
-			binder_free_buf(proc, thread, buffer, false);
+			binder_free_buf(proc, buffer);
 			break;
 		}
 
@@ -4557,7 +4445,7 @@ retry:
 			buffer->transaction = NULL;
 			binder_cleanup_transaction(t, "fd fixups failed",
 						   BR_FAILED_REPLY);
-			binder_free_buf(proc, thread, buffer, true);
+			binder_free_buf(proc, buffer);
 			binder_debug(BINDER_DEBUG_FAILED_TRANSACTION,
 				     "%d:%d %stransaction %d fd fixups failed %d/%d, line %d\n",
 				     proc->pid, thread->pid,
@@ -4797,7 +4685,6 @@ static void binder_free_proc(struct binder_proc *proc)
 	}
 	binder_alloc_deferred_release(&proc->alloc);
 	put_task_struct(proc->tsk);
-	put_cred(proc->cred);
 	binder_stats_deleted(BINDER_STAT_PROC);
 	kfree(proc);
 }
@@ -4875,20 +4762,23 @@ static int binder_thread_release(struct binder_proc *proc,
 	__release(&t->lock);
 
 	/*
-	 * If this thread used poll, make sure we remove the waitqueue from any
-	 * poll data structures holding it.
+	 * If this thread used poll, make sure we remove the waitqueue
+	 * from any epoll data structures holding it with POLLFREE.
+	 * waitqueue_active() is safe to use here because we're holding
+	 * the inner lock.
 	 */
-	if (thread->looper & BINDER_LOOPER_STATE_POLL)
-		wake_up_pollfree(&thread->wait);
+	if ((thread->looper & BINDER_LOOPER_STATE_POLL) &&
+	    waitqueue_active(&thread->wait)) {
+		wake_up_poll(&thread->wait, EPOLLHUP | POLLFREE);
+	}
 
 	binder_inner_proc_unlock(thread->proc);
 
 	/*
-	 * This is needed to avoid races between wake_up_pollfree() above and
-	 * someone else removing the last entry from the queue for other reasons
-	 * (e.g. ep_remove_wait_queue() being called due to an epoll file
-	 * descriptor being closed).  Such other users hold an RCU read lock, so
-	 * we can be sure they're done after we call synchronize_rcu().
+	 * This is needed to avoid races between wake_up_poll() above and
+	 * and ep_remove_waitqueue() called for other reasons (eg the epoll file
+	 * descriptor being closed); ep_remove_waitqueue() holds an RCU read
+	 * lock, so we can be sure it's done after calling synchronize_rcu().
 	 */
 	if (thread->looper & BINDER_LOOPER_STATE_POLL)
 		synchronize_rcu();
@@ -5006,7 +4896,7 @@ static int binder_ioctl_set_ctx_mgr(struct file *filp,
 		ret = -EBUSY;
 		goto out;
 	}
-	ret = security_binder_set_context_mgr(proc->cred);
+	ret = security_binder_set_context_mgr(proc->tsk);
 	if (ret < 0)
 		goto out;
 	if (uid_valid(context->binder_context_mgr_uid)) {
@@ -5332,13 +5222,9 @@ static int binder_open(struct inode *nodp, struct file *filp)
 	spin_lock_init(&proc->outer_lock);
 	get_task_struct(current->group_leader);
 	proc->tsk = current->group_leader;
-<<<<<<< HEAD
 #if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
 	proc->proc_type = is_binder_proc_sf(proc) ? 1 : 0;
 #endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
-=======
-	proc->cred = get_cred(filp->f_cred);
->>>>>>> 28a1e470b000 (binder: use euid from cred instead of using task)
 	INIT_LIST_HEAD(&proc->todo);
 	if (binder_supported_policy(current->policy)) {
 		proc->default_priority.sched_policy = current->policy;
