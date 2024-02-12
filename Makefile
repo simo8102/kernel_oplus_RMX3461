@@ -3,7 +3,7 @@ VERSION = 5
 PATCHLEVEL = 4
 SUBLEVEL = 180
 EXTRAVERSION =
-NAME = Optimus Kernel
+NAME = GigglyBits Kurnal
 
 # indicate that change "Kbuild: Support nested composite objects" is
 # present in the kernel so that out-of-tree modules can act upon it
