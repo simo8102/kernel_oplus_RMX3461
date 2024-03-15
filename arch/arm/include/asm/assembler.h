@@ -1,507 +1,790 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- *  arch/arm/include/asm/assembler.h
+ * Based on arch/arm/include/asm/assembler.h, arch/arm/mm/proc-macros.S
  *
- *  Copyright (C) 1996-2000 Russell King
- *
- *  This file contains arm architecture specific defines
- *  for the different processors.
- *
- *  Do not include any C declarations in this file - it is included by
- *  assembler source.
+ * Copyright (C) 1996-2000 Russell King
+ * Copyright (C) 2012 ARM Ltd.
  */
-#ifndef __ASM_ASSEMBLER_H__
-#define __ASM_ASSEMBLER_H__
-
 #ifndef __ASSEMBLY__
 #error "Only include this from assembly code"
 #endif
 
-#include <asm/ptrace.h>
-#include <asm/opcodes-virt.h>
+#ifndef __ASM_ASSEMBLER_H
+#define __ASM_ASSEMBLER_H
+
+#include <asm-generic/export.h>
+
 #include <asm/asm-offsets.h>
+#include <asm/cpufeature.h>
+#include <asm/cputype.h>
+#include <asm/debug-monitors.h>
 #include <asm/page.h>
+#include <asm/pgtable-hwdef.h>
+#include <asm/ptrace.h>
 #include <asm/thread_info.h>
-#include <asm/uaccess-asm.h>
 
-#define IOMEM(x)	(x)
+	.macro save_and_disable_daif, flags
+	mrs	\flags, daif
+	msr	daifset, #0xf
+	.endm
+
+	.macro disable_daif
+	msr	daifset, #0xf
+	.endm
+
+	.macro enable_daif
+	msr	daifclr, #0xf
+	.endm
+
+	.macro	restore_daif, flags:req
+	msr	daif, \flags
+	.endm
+
+	/* Only on aarch64 pstate, PSR_D_BIT is different for aarch32 */
+	.macro	inherit_daif, pstate:req, tmp:req
+	and	\tmp, \pstate, #(PSR_D_BIT | PSR_A_BIT | PSR_I_BIT | PSR_F_BIT)
+	msr	daif, \tmp
+	.endm
+
+	/* IRQ is the lowest priority flag, unconditionally unmask the rest. */
+	.macro enable_da_f
+	msr	daifclr, #(8 | 4 | 1)
+	.endm
 
 /*
- * Endian independent macros for shifting bytes within registers.
+ * Enable and disable interrupts.
  */
-#ifndef __ARMEB__
-#define lspull          lsr
-#define lspush          lsl
-#define get_byte_0      lsl #0
-#define get_byte_1	lsr #8
-#define get_byte_2	lsr #16
-#define get_byte_3	lsr #24
-#define put_byte_0      lsl #0
-#define put_byte_1	lsl #8
-#define put_byte_2	lsl #16
-#define put_byte_3	lsl #24
-#else
-#define lspull          lsl
-#define lspush          lsr
-#define get_byte_0	lsr #24
-#define get_byte_1	lsr #16
-#define get_byte_2	lsr #8
-#define get_byte_3      lsl #0
-#define put_byte_0	lsl #24
-#define put_byte_1	lsl #16
-#define put_byte_2	lsl #8
-#define put_byte_3      lsl #0
-#endif
+	.macro	disable_irq
+	msr	daifset, #2
+	.endm
 
-/* Select code for any configuration running in BE8 mode */
-#ifdef CONFIG_CPU_ENDIAN_BE8
-#define ARM_BE8(code...) code
-#else
-#define ARM_BE8(code...)
-#endif
+	.macro	enable_irq
+	msr	daifclr, #2
+	.endm
+
+	.macro	save_and_disable_irq, flags
+	mrs	\flags, daif
+	msr	daifset, #2
+	.endm
+
+	.macro	restore_irq, flags
+	msr	daif, \flags
+	.endm
 
 /*
- * Data preload for architectures that support it
+ * Save/disable and restore interrupts.
  */
-#if __LINUX_ARM_ARCH__ >= 5
-#define PLD(code...)	code
-#else
-#define PLD(code...)
-#endif
-
-/*
- * This can be used to enable code to cacheline align the destination
- * pointer when bulk writing to memory.  Experiments on StrongARM and
- * XScale didn't show this a worthwhile thing to do when the cache is not
- * set to write-allocate (this would need further testing on XScale when WA
- * is used).
- *
- * On Feroceon there is much to gain however, regardless of cache mode.
- */
-#ifdef CONFIG_CPU_FEROCEON
-#define CALGN(code...) code
-#else
-#define CALGN(code...)
-#endif
-
-#define IMM12_MASK 0xfff
-
-/*
- * Enable and disable interrupts
- */
-#if __LINUX_ARM_ARCH__ >= 6
-	.macro	disable_irq_notrace
-	cpsid	i
-	.endm
-
-	.macro	enable_irq_notrace
-	cpsie	i
-	.endm
-#else
-	.macro	disable_irq_notrace
-	msr	cpsr_c, #PSR_I_BIT | SVC_MODE
-	.endm
-
-	.macro	enable_irq_notrace
-	msr	cpsr_c, #SVC_MODE
-	.endm
-#endif
-
-#if __LINUX_ARM_ARCH__ < 7
-	.macro	dsb, args
-	mcr	p15, 0, r0, c7, c10, 4
-	.endm
-
-	.macro	isb, args
-	mcr	p15, 0, r0, c7, c5, 4
-	.endm
-#endif
-
-	.macro asm_trace_hardirqs_off, save=1
-#if defined(CONFIG_TRACE_IRQFLAGS)
-	.if \save
-	stmdb   sp!, {r0-r3, ip, lr}
-	.endif
-	bl	trace_hardirqs_off
-	.if \save
-	ldmia	sp!, {r0-r3, ip, lr}
-	.endif
-#endif
-	.endm
-
-	.macro asm_trace_hardirqs_on, cond=al, save=1
-#if defined(CONFIG_TRACE_IRQFLAGS)
-	/*
-	 * actually the registers should be pushed and pop'd conditionally, but
-	 * after bl the flags are certainly clobbered
-	 */
-	.if \save
-	stmdb   sp!, {r0-r3, ip, lr}
-	.endif
-	bl\cond	trace_hardirqs_on
-	.if \save
-	ldmia	sp!, {r0-r3, ip, lr}
-	.endif
-#endif
-	.endm
-
-	.macro disable_irq, save=1
-	disable_irq_notrace
-	asm_trace_hardirqs_off \save
-	.endm
-
-	.macro enable_irq
-	asm_trace_hardirqs_on
-	enable_irq_notrace
-	.endm
-/*
- * Save the current IRQ state and disable IRQs.  Note that this macro
- * assumes FIQs are enabled, and that the processor is in SVC mode.
- */
-	.macro	save_and_disable_irqs, oldcpsr
-#ifdef CONFIG_CPU_V7M
-	mrs	\oldcpsr, primask
-#else
-	mrs	\oldcpsr, cpsr
-#endif
+	.macro	save_and_disable_irqs, olddaif
+	mrs	\olddaif, daif
 	disable_irq
 	.endm
 
-	.macro	save_and_disable_irqs_notrace, oldcpsr
-#ifdef CONFIG_CPU_V7M
-	mrs	\oldcpsr, primask
-#else
-	mrs	\oldcpsr, cpsr
-#endif
-	disable_irq_notrace
+	.macro	restore_irqs, olddaif
+	msr	daif, \olddaif
 	.endm
 
-/*
- * Restore interrupt state previously stored in a register.  We don't
- * guarantee that this will preserve the flags.
- */
-	.macro	restore_irqs_notrace, oldcpsr
-#ifdef CONFIG_CPU_V7M
-	msr	primask, \oldcpsr
-#else
-	msr	cpsr_c, \oldcpsr
-#endif
+	.macro	enable_dbg
+	msr	daifclr, #8
 	.endm
 
-	.macro restore_irqs, oldcpsr
-	tst	\oldcpsr, #PSR_I_BIT
-	asm_trace_hardirqs_on cond=eq
-	restore_irqs_notrace \oldcpsr
+	.macro	disable_step_tsk, flgs, tmp
+	tbz	\flgs, #TIF_SINGLESTEP, 9990f
+	mrs	\tmp, mdscr_el1
+	bic	\tmp, \tmp, #DBG_MDSCR_SS
+	msr	mdscr_el1, \tmp
+	isb	// Synchronise with enable_dbg
+9990:
 	.endm
 
-/*
- * Assembly version of "adr rd, BSYM(sym)".  This should only be used to
- * reference local symbols in the same assembly file which are to be
- * resolved by the assembler.  Other usage is undefined.
- */
-	.irp	c,,eq,ne,cs,cc,mi,pl,vs,vc,hi,ls,ge,lt,gt,le,hs,lo
-	.macro	badr\c, rd, sym
-#ifdef CONFIG_THUMB2_KERNEL
-	adr\c	\rd, \sym + 1
-#else
-	adr\c	\rd, \sym
-#endif
-	.endm
-	.endr
-
-/*
- * Get current thread_info.
- */
-	.macro	get_thread_info, rd
- ARM(	mov	\rd, sp, lsr #THREAD_SIZE_ORDER + PAGE_SHIFT	)
- THUMB(	mov	\rd, sp			)
- THUMB(	lsr	\rd, \rd, #THREAD_SIZE_ORDER + PAGE_SHIFT	)
-	mov	\rd, \rd, lsl #THREAD_SIZE_ORDER + PAGE_SHIFT
-	.endm
-
-/*
- * Increment/decrement the preempt count.
- */
-#ifdef CONFIG_PREEMPT_COUNT
-	.macro	inc_preempt_count, ti, tmp
-	ldr	\tmp, [\ti, #TI_PREEMPT]	@ get preempt count
-	add	\tmp, \tmp, #1			@ increment it
-	str	\tmp, [\ti, #TI_PREEMPT]
-	.endm
-
-	.macro	dec_preempt_count, ti, tmp
-	ldr	\tmp, [\ti, #TI_PREEMPT]	@ get preempt count
-	sub	\tmp, \tmp, #1			@ decrement it
-	str	\tmp, [\ti, #TI_PREEMPT]
-	.endm
-
-	.macro	dec_preempt_count_ti, ti, tmp
-	get_thread_info \ti
-	dec_preempt_count \ti, \tmp
-	.endm
-#else
-	.macro	inc_preempt_count, ti, tmp
-	.endm
-
-	.macro	dec_preempt_count, ti, tmp
-	.endm
-
-	.macro	dec_preempt_count_ti, ti, tmp
-	.endm
-#endif
-
-#define USERL(l, x...)				\
-9999:	x;					\
-	.pushsection __ex_table,"a";		\
-	.align	3;				\
-	.long	9999b,l;			\
-	.popsection
-
-#define USER(x...)	USERL(9001f, x)
-
-#ifdef CONFIG_SMP
-#define ALT_SMP(instr...)					\
-9998:	instr
-/*
- * Note: if you get assembler errors from ALT_UP() when building with
- * CONFIG_THUMB2_KERNEL, you almost certainly need to use
- * ALT_SMP( W(instr) ... )
- */
-#define ALT_UP(instr...)					\
-	.pushsection ".alt.smp.init", "a"			;\
-	.long	9998b						;\
-9997:	instr							;\
-	.if . - 9997b == 2					;\
-		nop						;\
-	.endif							;\
-	.if . - 9997b != 4					;\
-		.error "ALT_UP() content must assemble to exactly 4 bytes";\
-	.endif							;\
-	.popsection
-#define ALT_UP_B(label)					\
-	.pushsection ".alt.smp.init", "a"			;\
-	.long	9998b						;\
-	W(b)	. + (label - 9998b)					;\
-	.popsection
-#else
-#define ALT_SMP(instr...)
-#define ALT_UP(instr...) instr
-#define ALT_UP_B(label) b label
-#endif
-
-/*
- * Instruction barrier
- */
-	.macro	instr_sync
-#if __LINUX_ARM_ARCH__ >= 7
-	isb
-#elif __LINUX_ARM_ARCH__ == 6
-	mcr	p15, 0, r0, c7, c5, 4
-#endif
+	/* call with daif masked */
+	.macro	enable_step_tsk, flgs, tmp
+	tbz	\flgs, #TIF_SINGLESTEP, 9990f
+	mrs	\tmp, mdscr_el1
+	orr	\tmp, \tmp, #DBG_MDSCR_SS
+	msr	mdscr_el1, \tmp
+9990:
 	.endm
 
 /*
  * SMP data memory barrier
  */
-	.macro	smp_dmb mode
-#ifdef CONFIG_SMP
-#if __LINUX_ARM_ARCH__ >= 7
-	.ifeqs "\mode","arm"
-	ALT_SMP(dmb	ish)
-	.else
-	ALT_SMP(W(dmb)	ish)
-	.endif
-#elif __LINUX_ARM_ARCH__ == 6
-	ALT_SMP(mcr	p15, 0, r0, c7, c10, 5)	@ dmb
-#else
-#error Incompatible SMP platform
-#endif
-	.ifeqs "\mode","arm"
-	ALT_UP(nop)
-	.else
-	ALT_UP(W(nop))
-	.endif
-#endif
+	.macro	smp_dmb, opt
+	dmb	\opt
 	.endm
-
-#if defined(CONFIG_CPU_V7M)
-	/*
-	 * setmode is used to assert to be in svc mode during boot. For v7-M
-	 * this is done in __v7m_setup, so setmode can be empty here.
-	 */
-	.macro	setmode, mode, reg
-	.endm
-#elif defined(CONFIG_THUMB2_KERNEL)
-	.macro	setmode, mode, reg
-	mov	\reg, #\mode
-	msr	cpsr_c, \reg
-	.endm
-#else
-	.macro	setmode, mode, reg
-	msr	cpsr_c, #\mode
-	.endm
-#endif
 
 /*
- * Helper macro to enter SVC mode cleanly and mask interrupts. reg is
- * a scratch register for the macro to overwrite.
- *
- * This macro is intended for forcing the CPU into SVC mode at boot time.
- * you cannot return to the original mode.
+ * RAS Error Synchronization barrier
  */
-.macro safe_svcmode_maskall reg:req
-#if __LINUX_ARM_ARCH__ >= 6 && !defined(CONFIG_CPU_V7M)
-	mrs	\reg , cpsr
-	eor	\reg, \reg, #HYP_MODE
-	tst	\reg, #MODE_MASK
-	bic	\reg , \reg , #MODE_MASK
-	orr	\reg , \reg , #PSR_I_BIT | PSR_F_BIT | SVC_MODE
-THUMB(	orr	\reg , \reg , #PSR_T_BIT	)
-	bne	1f
-	orr	\reg, \reg, #PSR_A_BIT
-	badr	lr, 2f
-	msr	spsr_cxsf, \reg
-	__MSR_ELR_HYP(14)
-	__ERET
-1:	msr	cpsr_c, \reg
-2:
+	.macro  esb
+#ifdef CONFIG_ARM64_RAS_EXTN
+	hint    #16
 #else
-/*
- * workaround for possibly broken pre-v6 hardware
- * (akita, Sharp Zaurus C-1000, PXA270-based)
- */
-	setmode	PSR_F_BIT | PSR_I_BIT | SVC_MODE, \reg
-#endif
-.endm
-
-/*
- * STRT/LDRT access macros with ARM and Thumb-2 variants
- */
-#ifdef CONFIG_THUMB2_KERNEL
-
-	.macro	usraccoff, instr, reg, ptr, inc, off, cond, abort, t=TUSER()
-9999:
-	.if	\inc == 1
-	\instr\()b\t\cond\().w \reg, [\ptr, #\off]
-	.elseif	\inc == 4
-	\instr\t\cond\().w \reg, [\ptr, #\off]
-	.else
-	.error	"Unsupported inc macro argument"
-	.endif
-
-	.pushsection __ex_table,"a"
-	.align	3
-	.long	9999b, \abort
-	.popsection
-	.endm
-
-	.macro	usracc, instr, reg, ptr, inc, cond, rept, abort
-	@ explicit IT instruction needed because of the label
-	@ introduced by the USER macro
-	.ifnc	\cond,al
-	.if	\rept == 1
-	itt	\cond
-	.elseif	\rept == 2
-	ittt	\cond
-	.else
-	.error	"Unsupported rept macro argument"
-	.endif
-	.endif
-
-	@ Slightly optimised to avoid incrementing the pointer twice
-	usraccoff \instr, \reg, \ptr, \inc, 0, \cond, \abort
-	.if	\rept == 2
-	usraccoff \instr, \reg, \ptr, \inc, \inc, \cond, \abort
-	.endif
-
-	add\cond \ptr, #\rept * \inc
-	.endm
-
-#else	/* !CONFIG_THUMB2_KERNEL */
-
-	.macro	usracc, instr, reg, ptr, inc, cond, rept, abort, t=TUSER()
-	.rept	\rept
-9999:
-	.if	\inc == 1
-	\instr\()b\t\cond \reg, [\ptr], #\inc
-	.elseif	\inc == 4
-	\instr\t\cond \reg, [\ptr], #\inc
-	.else
-	.error	"Unsupported inc macro argument"
-	.endif
-
-	.pushsection __ex_table,"a"
-	.align	3
-	.long	9999b, \abort
-	.popsection
-	.endr
-	.endm
-
-#endif	/* CONFIG_THUMB2_KERNEL */
-
-	.macro	strusr, reg, ptr, inc, cond=al, rept=1, abort=9001f
-	usracc	str, \reg, \ptr, \inc, \cond, \rept, \abort
-	.endm
-
-	.macro	ldrusr, reg, ptr, inc, cond=al, rept=1, abort=9001f
-	usracc	ldr, \reg, \ptr, \inc, \cond, \rept, \abort
-	.endm
-
-/* Utility macro for declaring string literals */
-	.macro	string name:req, string
-	.type \name , #object
-\name:
-	.asciz "\string"
-	.size \name , . - \name
-	.endm
-
-	.irp	c,,eq,ne,cs,cc,mi,pl,vs,vc,hi,ls,ge,lt,gt,le,hs,lo
-	.macro	ret\c, reg
-#if __LINUX_ARM_ARCH__ < 6
-	mov\c	pc, \reg
-#else
-	.ifeqs	"\reg", "lr"
-	bx\c	\reg
-	.else
-	mov\c	pc, \reg
-	.endif
-#endif
-	.endm
-	.endr
-
-	.macro	ret.w, reg
-	ret	\reg
-#ifdef CONFIG_THUMB2_KERNEL
 	nop
 #endif
 	.endm
 
-	.macro	bug, msg, line
-#ifdef CONFIG_THUMB2_KERNEL
-1:	.inst	0xde02
+/*
+ * Value prediction barrier
+ */
+	.macro	csdb
+	hint	#20
+	.endm
+
+/*
+ * Speculation barrier
+ */
+	.macro	sb
+alternative_if_not ARM64_HAS_SB
+	dsb	nsh
+	isb
+alternative_else
+	SB_BARRIER_INSN
+	nop
+alternative_endif
+	.endm
+
+/*
+ * NOP sequence
+ */
+	.macro	nops, num
+	.rept	\num
+	nop
+	.endr
+	.endm
+
+/*
+ * Emit an entry into the exception table
+ */
+	.macro		_asm_extable, from, to
+	.pushsection	__ex_table, "a"
+	.align		3
+	.long		(\from - .), (\to - .)
+	.popsection
+	.endm
+
+#define USER(l, x...)				\
+9999:	x;					\
+	_asm_extable	9999b, l
+
+/*
+ * Register aliases.
+ */
+lr	.req	x30		// link register
+
+/*
+ * Vector entry
+ */
+	 .macro	ventry	label
+	.align	7
+	b	\label
+	.endm
+
+/*
+ * Select code when configured for BE.
+ */
+#ifdef CONFIG_CPU_BIG_ENDIAN
+#define CPU_BE(code...) code
 #else
-1:	.inst	0xe7f001f2
+#define CPU_BE(code...)
 #endif
-#ifdef CONFIG_DEBUG_BUGVERBOSE
-	.pushsection .rodata.str, "aMS", %progbits, 1
-2:	.asciz	"\msg"
-	.popsection
-	.pushsection __bug_table, "aw"
-	.align	2
-	.word	1b, 2b
-	.hword	\line
-	.popsection
+
+/*
+ * Select code when configured for LE.
+ */
+#ifdef CONFIG_CPU_BIG_ENDIAN
+#define CPU_LE(code...)
+#else
+#define CPU_LE(code...) code
+#endif
+
+/*
+ * Define a macro that constructs a 64-bit value by concatenating two
+ * 32-bit registers. Note that on big endian systems the order of the
+ * registers is swapped.
+ */
+#ifndef CONFIG_CPU_BIG_ENDIAN
+	.macro	regs_to_64, rd, lbits, hbits
+#else
+	.macro	regs_to_64, rd, hbits, lbits
+#endif
+	orr	\rd, \lbits, \hbits, lsl #32
+	.endm
+
+/*
+ * Pseudo-ops for PC-relative adr/ldr/str <reg>, <symbol> where
+ * <symbol> is within the range +/- 4 GB of the PC.
+ */
+	/*
+	 * @dst: destination register (64 bit wide)
+	 * @sym: name of the symbol
+	 */
+	.macro	adr_l, dst, sym
+	adrp	\dst, \sym
+	add	\dst, \dst, :lo12:\sym
+	.endm
+
+	/*
+	 * @dst: destination register (32 or 64 bit wide)
+	 * @sym: name of the symbol
+	 * @tmp: optional 64-bit scratch register to be used if <dst> is a
+	 *       32-bit wide register, in which case it cannot be used to hold
+	 *       the address
+	 */
+	.macro	ldr_l, dst, sym, tmp=
+	.ifb	\tmp
+	adrp	\dst, \sym
+	ldr	\dst, [\dst, :lo12:\sym]
+	.else
+	adrp	\tmp, \sym
+	ldr	\dst, [\tmp, :lo12:\sym]
+	.endif
+	.endm
+
+	/*
+	 * @src: source register (32 or 64 bit wide)
+	 * @sym: name of the symbol
+	 * @tmp: mandatory 64-bit scratch register to calculate the address
+	 *       while <src> needs to be preserved.
+	 */
+	.macro	str_l, src, sym, tmp
+	adrp	\tmp, \sym
+	str	\src, [\tmp, :lo12:\sym]
+	.endm
+
+	/*
+	 * @dst: Result of per_cpu(sym, smp_processor_id()) (can be SP)
+	 * @sym: The name of the per-cpu variable
+	 * @tmp: scratch register
+	 */
+	.macro adr_this_cpu, dst, sym, tmp
+	adrp	\tmp, \sym
+	add	\dst, \tmp, #:lo12:\sym
+alternative_if_not ARM64_HAS_VIRT_HOST_EXTN
+	mrs	\tmp, tpidr_el1
+alternative_else
+	mrs	\tmp, tpidr_el2
+alternative_endif
+	add	\dst, \dst, \tmp
+	.endm
+
+	/*
+	 * @dst: Result of READ_ONCE(per_cpu(sym, smp_processor_id()))
+	 * @sym: The name of the per-cpu variable
+	 * @tmp: scratch register
+	 */
+	.macro ldr_this_cpu dst, sym, tmp
+	adr_l	\dst, \sym
+alternative_if_not ARM64_HAS_VIRT_HOST_EXTN
+	mrs	\tmp, tpidr_el1
+alternative_else
+	mrs	\tmp, tpidr_el2
+alternative_endif
+	ldr	\dst, [\dst, \tmp]
+	.endm
+
+/*
+ * vma_vm_mm - get mm pointer from vma pointer (vma->vm_mm)
+ */
+	.macro	vma_vm_mm, rd, rn
+	ldr	\rd, [\rn, #VMA_VM_MM]
+	.endm
+
+/*
+ * mmid - get context id from mm pointer (mm->context.id)
+ */
+	.macro	mmid, rd, rn
+	ldr	\rd, [\rn, #MM_CONTEXT_ID]
+	.endm
+/*
+ * read_ctr - read CTR_EL0. If the system has mismatched register fields,
+ * provide the system wide safe value from arm64_ftr_reg_ctrel0.sys_val
+ */
+	.macro	read_ctr, reg
+alternative_if_not ARM64_MISMATCHED_CACHE_TYPE
+	mrs	\reg, ctr_el0			// read CTR
+	nop
+alternative_else
+	ldr_l	\reg, arm64_ftr_reg_ctrel0 + ARM64_FTR_SYSVAL
+alternative_endif
+	.endm
+
+
+/*
+ * raw_dcache_line_size - get the minimum D-cache line size on this CPU
+ * from the CTR register.
+ */
+	.macro	raw_dcache_line_size, reg, tmp
+	mrs	\tmp, ctr_el0			// read CTR
+	ubfm	\tmp, \tmp, #16, #19		// cache line size encoding
+	mov	\reg, #4			// bytes per word
+	lsl	\reg, \reg, \tmp		// actual cache line size
+	.endm
+
+/*
+ * dcache_line_size - get the safe D-cache line size across all CPUs
+ */
+	.macro	dcache_line_size, reg, tmp
+	read_ctr	\tmp
+	ubfm		\tmp, \tmp, #16, #19	// cache line size encoding
+	mov		\reg, #4		// bytes per word
+	lsl		\reg, \reg, \tmp	// actual cache line size
+	.endm
+
+/*
+ * raw_icache_line_size - get the minimum I-cache line size on this CPU
+ * from the CTR register.
+ */
+	.macro	raw_icache_line_size, reg, tmp
+	mrs	\tmp, ctr_el0			// read CTR
+	and	\tmp, \tmp, #0xf		// cache line size encoding
+	mov	\reg, #4			// bytes per word
+	lsl	\reg, \reg, \tmp		// actual cache line size
+	.endm
+
+/*
+ * icache_line_size - get the safe I-cache line size across all CPUs
+ */
+	.macro	icache_line_size, reg, tmp
+	read_ctr	\tmp
+	and		\tmp, \tmp, #0xf	// cache line size encoding
+	mov		\reg, #4		// bytes per word
+	lsl		\reg, \reg, \tmp	// actual cache line size
+	.endm
+
+/*
+ * tcr_set_t0sz - update TCR.T0SZ so that we can load the ID map
+ */
+	.macro	tcr_set_t0sz, valreg, t0sz
+	bfi	\valreg, \t0sz, #TCR_T0SZ_OFFSET, #TCR_TxSZ_WIDTH
+	.endm
+
+/*
+ * tcr_set_t1sz - update TCR.T1SZ
+ */
+	.macro	tcr_set_t1sz, valreg, t1sz
+	bfi	\valreg, \t1sz, #TCR_T1SZ_OFFSET, #TCR_TxSZ_WIDTH
+	.endm
+
+/*
+ * tcr_compute_pa_size - set TCR.(I)PS to the highest supported
+ * ID_AA64MMFR0_EL1.PARange value
+ *
+ *	tcr:		register with the TCR_ELx value to be updated
+ *	pos:		IPS or PS bitfield position
+ *	tmp{0,1}:	temporary registers
+ */
+	.macro	tcr_compute_pa_size, tcr, pos, tmp0, tmp1
+	mrs	\tmp0, ID_AA64MMFR0_EL1
+	// Narrow PARange to fit the PS field in TCR_ELx
+	ubfx	\tmp0, \tmp0, #ID_AA64MMFR0_PARANGE_SHIFT, #3
+	mov	\tmp1, #ID_AA64MMFR0_PARANGE_MAX
+	cmp	\tmp0, \tmp1
+	csel	\tmp0, \tmp1, \tmp0, hi
+	bfi	\tcr, \tmp0, \pos, #3
+	.endm
+
+/*
+ * Macro to perform a data cache maintenance for the interval
+ * [kaddr, kaddr + size)
+ *
+ * 	op:		operation passed to dc instruction
+ * 	domain:		domain used in dsb instruciton
+ * 	kaddr:		starting virtual address of the region
+ * 	size:		size of the region
+ * 	Corrupts:	kaddr, size, tmp1, tmp2
+ */
+	.macro __dcache_op_workaround_clean_cache, op, kaddr
+alternative_if_not ARM64_WORKAROUND_CLEAN_CACHE
+	dc	\op, \kaddr
+alternative_else
+	dc	civac, \kaddr
+alternative_endif
+	.endm
+
+	.macro dcache_by_line_op op, domain, kaddr, size, tmp1, tmp2
+	dcache_line_size \tmp1, \tmp2
+	add	\size, \kaddr, \size
+	sub	\tmp2, \tmp1, #1
+	bic	\kaddr, \kaddr, \tmp2
+9998:
+	.ifc	\op, cvau
+	__dcache_op_workaround_clean_cache \op, \kaddr
+	.else
+	.ifc	\op, cvac
+	__dcache_op_workaround_clean_cache \op, \kaddr
+	.else
+	.ifc	\op, cvap
+	sys	3, c7, c12, 1, \kaddr	// dc cvap
+	.else
+	.ifc	\op, cvadp
+	sys	3, c7, c13, 1, \kaddr	// dc cvadp
+	.else
+	dc	\op, \kaddr
+	.endif
+	.endif
+	.endif
+	.endif
+	add	\kaddr, \kaddr, \tmp1
+	cmp	\kaddr, \size
+	b.lo	9998b
+	dsb	\domain
+	.endm
+
+/*
+ * Macro to perform an instruction cache maintenance for the interval
+ * [start, end)
+ *
+ * 	start, end:	virtual addresses describing the region
+ *	label:		A label to branch to on user fault.
+ * 	Corrupts:	tmp1, tmp2
+ */
+	.macro invalidate_icache_by_line start, end, tmp1, tmp2, label
+	icache_line_size \tmp1, \tmp2
+	sub	\tmp2, \tmp1, #1
+	bic	\tmp2, \start, \tmp2
+9997:
+USER(\label, ic	ivau, \tmp2)			// invalidate I line PoU
+	add	\tmp2, \tmp2, \tmp1
+	cmp	\tmp2, \end
+	b.lo	9997b
+	dsb	ish
+	isb
+	.endm
+
+/*
+ * reset_pmuserenr_el0 - reset PMUSERENR_EL0 if PMUv3 present
+ */
+	.macro	reset_pmuserenr_el0, tmpreg
+	mrs	\tmpreg, id_aa64dfr0_el1
+	sbfx	\tmpreg, \tmpreg, #ID_AA64DFR0_PMUVER_SHIFT, #4
+	cmp	\tmpreg, #1			// Skip if no PMU present
+	b.lt	9000f
+	msr	pmuserenr_el0, xzr		// Disable PMU access from EL0
+9000:
+	.endm
+
+/*
+ * reset_amuserenr_el0 - reset AMUSERENR_EL0 if AMUv1 present
+ */
+	.macro	reset_amuserenr_el0, tmpreg
+	mrs	\tmpreg, id_aa64pfr0_el1	// Check ID_AA64PFR0_EL1
+	ubfx	\tmpreg, \tmpreg, #ID_AA64PFR0_AMU_SHIFT, #4
+	cbz	\tmpreg, .Lskip_\@		// Skip if no AMU present
+	msr_s	SYS_AMUSERENR_EL0, xzr		// Disable AMU access from EL0
+.Lskip_\@:
+	.endm
+/*
+ * copy_page - copy src to dest using temp registers t1-t8
+ */
+	.macro copy_page dest:req src:req t1:req t2:req t3:req t4:req t5:req t6:req t7:req t8:req
+9998:	ldp	\t1, \t2, [\src]
+	ldp	\t3, \t4, [\src, #16]
+	ldp	\t5, \t6, [\src, #32]
+	ldp	\t7, \t8, [\src, #48]
+	add	\src, \src, #64
+	stnp	\t1, \t2, [\dest]
+	stnp	\t3, \t4, [\dest, #16]
+	stnp	\t5, \t6, [\dest, #32]
+	stnp	\t7, \t8, [\dest, #48]
+	add	\dest, \dest, #64
+	tst	\src, #(PAGE_SIZE - 1)
+	b.ne	9998b
+	.endm
+
+/*
+ * Deprecated! Use SYM_FUNC_{START,START_WEAK,END}_PI instead.
+ * Annotate a function as position independent, i.e., safe to be called before
+ * the kernel virtual mapping is activated.
+ */
+#define ENDPIPROC(x)			\
+	.globl	__pi_##x;		\
+	.type 	__pi_##x, %function;	\
+	.set	__pi_##x, x;		\
+	.size	__pi_##x, . - x;	\
+	ENDPROC(x)
+
+/*
+ * Annotate a function as being unsuitable for kprobes.
+ */
+#ifdef CONFIG_KPROBES
+#define NOKPROBE(x)				\
+	.pushsection "_kprobe_blacklist", "aw";	\
+	.quad	x;				\
+	.popsection;
+#else
+#define NOKPROBE(x)
+#endif
+
+#ifdef CONFIG_KASAN
+#define EXPORT_SYMBOL_NOKASAN(name)
+#else
+#define EXPORT_SYMBOL_NOKASAN(name)	EXPORT_SYMBOL(name)
+#endif
+
+	/*
+	 * Emit a 64-bit absolute little endian symbol reference in a way that
+	 * ensures that it will be resolved at build time, even when building a
+	 * PIE binary. This requires cooperation from the linker script, which
+	 * must emit the lo32/hi32 halves individually.
+	 */
+	.macro	le64sym, sym
+	.long	\sym\()_lo32
+	.long	\sym\()_hi32
+	.endm
+
+	/*
+	 * mov_q - move an immediate constant into a 64-bit register using
+	 *         between 2 and 4 movz/movk instructions (depending on the
+	 *         magnitude and sign of the operand)
+	 */
+	.macro	mov_q, reg, val
+	.if (((\val) >> 31) == 0 || ((\val) >> 31) == 0x1ffffffff)
+	movz	\reg, :abs_g1_s:\val
+	.else
+	.if (((\val) >> 47) == 0 || ((\val) >> 47) == 0x1ffff)
+	movz	\reg, :abs_g2_s:\val
+	.else
+	movz	\reg, :abs_g3:\val
+	movk	\reg, :abs_g2_nc:\val
+	.endif
+	movk	\reg, :abs_g1_nc:\val
+	.endif
+	movk	\reg, :abs_g0_nc:\val
+	.endm
+
+/*
+ * Return the current task_struct.
+ */
+	.macro	get_current_task, rd
+	mrs	\rd, sp_el0
+	.endm
+
+/*
+ * Offset ttbr1 to allow for 48-bit kernel VAs set with 52-bit PTRS_PER_PGD.
+ * orr is used as it can cover the immediate value (and is idempotent).
+ * In future this may be nop'ed out when dealing with 52-bit kernel VAs.
+ * 	ttbr: Value of ttbr to set, modified.
+ */
+	.macro	offset_ttbr1, ttbr, tmp
+#ifdef CONFIG_ARM64_VA_BITS_52
+	mrs_s	\tmp, SYS_ID_AA64MMFR2_EL1
+	and	\tmp, \tmp, #(0xf << ID_AA64MMFR2_LVA_SHIFT)
+	cbnz	\tmp, .Lskipoffs_\@
+	orr	\ttbr, \ttbr, #TTBR1_BADDR_4852_OFFSET
+.Lskipoffs_\@ :
 #endif
 	.endm
 
-#ifdef CONFIG_KPROBES
-#define _ASM_NOKPROBE(entry)				\
-	.pushsection "_kprobe_blacklist", "aw" ;	\
-	.balign 4 ;					\
-	.long entry;					\
-	.popsection
-#else
-#define _ASM_NOKPROBE(entry)
+/*
+ * Perform the reverse of offset_ttbr1.
+ * bic is used as it can cover the immediate value and, in future, won't need
+ * to be nop'ed out when dealing with 52-bit kernel VAs.
+ */
+	.macro	restore_ttbr1, ttbr
+#ifdef CONFIG_ARM64_VA_BITS_52
+	bic	\ttbr, \ttbr, #TTBR1_BADDR_4852_OFFSET
 #endif
+	.endm
 
-#endif /* __ASM_ASSEMBLER_H__ */
+/*
+ * Arrange a physical address in a TTBR register, taking care of 52-bit
+ * addresses.
+ *
+ * 	phys:	physical address, preserved
+ * 	ttbr:	returns the TTBR value
+ */
+	.macro	phys_to_ttbr, ttbr, phys
+#ifdef CONFIG_ARM64_PA_BITS_52
+	orr	\ttbr, \phys, \phys, lsr #46
+	and	\ttbr, \ttbr, #TTBR_BADDR_MASK_52
+#else
+	mov	\ttbr, \phys
+#endif
+	.endm
+
+	.macro	phys_to_pte, pte, phys
+#ifdef CONFIG_ARM64_PA_BITS_52
+	/*
+	 * We assume \phys is 64K aligned and this is guaranteed by only
+	 * supporting this configuration with 64K pages.
+	 */
+	orr	\pte, \phys, \phys, lsr #36
+	and	\pte, \pte, #PTE_ADDR_MASK
+#else
+	mov	\pte, \phys
+#endif
+	.endm
+
+	.macro	pte_to_phys, phys, pte
+#ifdef CONFIG_ARM64_PA_BITS_52
+	ubfiz	\phys, \pte, #(48 - 16 - 12), #16
+	bfxil	\phys, \pte, #16, #32
+	lsl	\phys, \phys, #16
+#else
+	and	\phys, \pte, #PTE_ADDR_MASK
+#endif
+	.endm
+
+/*
+ * tcr_clear_errata_bits - Clear TCR bits that trigger an errata on this CPU.
+ */
+	.macro	tcr_clear_errata_bits, tcr, tmp1, tmp2
+#ifdef CONFIG_FUJITSU_ERRATUM_010001
+	mrs	\tmp1, midr_el1
+
+	mov_q	\tmp2, MIDR_FUJITSU_ERRATUM_010001_MASK
+	and	\tmp1, \tmp1, \tmp2
+	mov_q	\tmp2, MIDR_FUJITSU_ERRATUM_010001
+	cmp	\tmp1, \tmp2
+	b.ne	10f
+
+	mov_q	\tmp2, TCR_CLEAR_FUJITSU_ERRATUM_010001
+	bic	\tcr, \tcr, \tmp2
+10:
+#endif /* CONFIG_FUJITSU_ERRATUM_010001 */
+	.endm
+
+/**
+ * Errata workaround prior to disable MMU. Insert an ISB immediately prior
+ * to executing the MSR that will change SCTLR_ELn[M] from a value of 1 to 0.
+ */
+	.macro pre_disable_mmu_workaround
+#ifdef CONFIG_QCOM_FALKOR_ERRATUM_E1041
+	isb
+#endif
+	.endm
+
+	/*
+	 * frame_push - Push @regcount callee saved registers to the stack,
+	 *              starting at x19, as well as x29/x30, and set x29 to
+	 *              the new value of sp. Add @extra bytes of stack space
+	 *              for locals.
+	 */
+	.macro		frame_push, regcount:req, extra
+	__frame		st, \regcount, \extra
+	.endm
+
+	/*
+	 * frame_pop  - Pop the callee saved registers from the stack that were
+	 *              pushed in the most recent call to frame_push, as well
+	 *              as x29/x30 and any extra stack space that may have been
+	 *              allocated.
+	 */
+	.macro		frame_pop
+	__frame		ld
+	.endm
+
+	.macro		__frame_regs, reg1, reg2, op, num
+	.if		.Lframe_regcount == \num
+	\op\()r		\reg1, [sp, #(\num + 1) * 8]
+	.elseif		.Lframe_regcount > \num
+	\op\()p		\reg1, \reg2, [sp, #(\num + 1) * 8]
+	.endif
+	.endm
+
+	.macro		__frame, op, regcount, extra=0
+	.ifc		\op, st
+	.if		(\regcount) < 0 || (\regcount) > 10
+	.error		"regcount should be in the range [0 ... 10]"
+	.endif
+	.if		((\extra) % 16) != 0
+	.error		"extra should be a multiple of 16 bytes"
+	.endif
+	.ifdef		.Lframe_regcount
+	.if		.Lframe_regcount != -1
+	.error		"frame_push/frame_pop may not be nested"
+	.endif
+	.endif
+	.set		.Lframe_regcount, \regcount
+	.set		.Lframe_extra, \extra
+	.set		.Lframe_local_offset, ((\regcount + 3) / 2) * 16
+	stp		x29, x30, [sp, #-.Lframe_local_offset - .Lframe_extra]!
+	mov		x29, sp
+	.endif
+
+	__frame_regs	x19, x20, \op, 1
+	__frame_regs	x21, x22, \op, 3
+	__frame_regs	x23, x24, \op, 5
+	__frame_regs	x25, x26, \op, 7
+	__frame_regs	x27, x28, \op, 9
+
+	.ifc		\op, ld
+	.if		.Lframe_regcount == -1
+	.error		"frame_push/frame_pop may not be nested"
+	.endif
+	ldp		x29, x30, [sp], #.Lframe_local_offset + .Lframe_extra
+	.set		.Lframe_regcount, -1
+	.endif
+	.endm
+
+/*
+ * Check whether to yield to another runnable task from kernel mode NEON code
+ * (which runs with preemption disabled).
+ *
+ * if_will_cond_yield_neon
+ *        // pre-yield patchup code
+ * do_cond_yield_neon
+ *        // post-yield patchup code
+ * endif_yield_neon    <label>
+ *
+ * where <label> is optional, and marks the point where execution will resume
+ * after a yield has been performed. If omitted, execution resumes right after
+ * the endif_yield_neon invocation. Note that the entire sequence, including
+ * the provided patchup code, will be omitted from the image if CONFIG_PREEMPT
+ * is not defined.
+ *
+ * As a convenience, in the case where no patchup code is required, the above
+ * sequence may be abbreviated to
+ *
+ * cond_yield_neon <label>
+ *
+ * Note that the patchup code does not support assembler directives that change
+ * the output section, any use of such directives is undefined.
+ *
+ * The yield itself consists of the following:
+ * - Check whether the preempt count is exactly 1 and a reschedule is also
+ *   needed. If so, calling of preempt_enable() in kernel_neon_end() will
+ *   trigger a reschedule. If it is not the case, yielding is pointless.
+ * - Disable and re-enable kernel mode NEON, and branch to the yield fixup
+ *   code.
+ *
+ * This macro sequence may clobber all CPU state that is not guaranteed by the
+ * AAPCS to be preserved across an ordinary function call.
+ */
+
+	.macro		cond_yield_neon, lbl
+	if_will_cond_yield_neon
+	do_cond_yield_neon
+	endif_yield_neon	\lbl
+	.endm
+
+	.macro		if_will_cond_yield_neon
+#ifdef CONFIG_PREEMPT
+	get_current_task	x0
+	ldr		x0, [x0, #TSK_TI_PREEMPT]
+	sub		x0, x0, #PREEMPT_DISABLE_OFFSET
+	cbz		x0, .Lyield_\@
+	/* fall through to endif_yield_neon */
+	.subsection	1
+.Lyield_\@ :
+#else
+	.section	".discard.cond_yield_neon", "ax"
+#endif
+	.endm
+
+	.macro		do_cond_yield_neon
+	bl		kernel_neon_end
+	bl		kernel_neon_begin
+	.endm
+
+	.macro		endif_yield_neon, lbl
+	.ifnb		\lbl
+	b		\lbl
+	.else
+	b		.Lyield_out_\@
+	.endif
+	.previous
+.Lyield_out_\@ :
+	.endm
+
+#endif	/* __ASM_ASSEMBLER_H */
